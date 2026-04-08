@@ -1,0 +1,124 @@
+"""
+
+This module generates Capital Ratio, Consolidated, Trend Analysis and Capital impact chart report. 
+All details in a single output File.
+
+"""
+import os
+import sys
+import warnings
+import configparser
+import pandas as pd
+from pandas.errors import PerformanceWarning
+from Consolidated_Process_Child import *
+from time import strftime
+from datetime import datetime
+from SQL_Config_v2 import connectionToSQLServer,get_app_value,SP_SA_Process_Log,SP_SA_Audit_Log,SP_SA_Error_Log,db_TBL_Output_Report
+warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.simplefilter(action='ignore', category=PerformanceWarning)
+warnings.simplefilter(action="ignore", category=UserWarning)
+
+class ConsolidatedReport:
+    def __init__(self, startTime):
+        try:
+            self.startTimestamp = startTime
+            self.connectionConfiguration = configparser.ConfigParser()
+            # Check if sys.argv is empty
+            if len(sys.argv) < 2:
+                raise ValueError("No command-line argument provided")
+            if not os.path.isfile(sys.argv[1]):
+                raise FileNotFoundError(f"File '{sys.argv[1]}' not found")
+            self.connectionConfiguration.read(sys.argv[1])
+             #print(self.connectionConfiguration["connectionStrings"]["Server"])
+            self.connectionSqlServer = connectionToSQLServer(self)
+            self.Data_Process = sys.argv[2]
+            
+            if self.Data_Process in ("CNB"):
+                self.CapitalRatiodf = pd.read_sql(f"select top 1 * from VW_SA_CNB_Capital_Ratio", self.connectionSqlServer)
+            else:
+                self.CapitalRatiodf = pd.read_sql(f"select top 1 * from VW_SA_RIHC_Capital_Ratio", self.connectionSqlServer)
+
+            # Check if the returned DataFrame is empty
+            if self.CapitalRatiodf.empty:
+                raise Exception(f'There is no data in the VW_SA_{self.Data_Process}_Capital_Ratio ')
+
+            if self.Data_Process in ("CNB"):
+                self.Data_Filename_df = pd.read_sql(f"SELECT DISTINCT Source_Filename FROM DSKH_ARGUS_ETL_PROCESS_SA..vw_SA_CNB_Consolidated_Input", self.connectionSqlServer)
+            else:
+                self.Data_Filename_df = pd.read_sql(f"SELECT DISTINCT Source_Filename FROM DSKH_ARGUS_ETL_PROCESS_SA..vw_SA_RIHC_Consolidated_Input", self.connectionSqlServer)
+            
+            if self.Data_Filename_df.empty:
+                raise Exception(f'There is no data in the VW_SA_{self.Data_Process}_Consolidated_Input view')
+            
+            self.Report_Name = 'Consolidated_Report'
+            self.Parent_Report = 'ScenarioInput_Reports'
+            self.Reporting_Period = self.CapitalRatiodf.iloc[0]["Reporting_Period"]
+            self.Data_File_Name = self.CapitalRatiodf.iloc[0]["Data_FileName"]
+            self.Mapping_File_Name = self.CapitalRatiodf.iloc[0]["Mapping_FileName"]
+            self.Source_Filename = self.Data_Filename_df["Source_Filename"].tolist()
+            self.Report_Creation_Time = datetime.now()
+            self.RUN_ID = self.CapitalRatiodf.iloc[0]["PID"]
+            self.Scenario_Name = self.Data_Process
+            self.Frequency = None 
+            self.Data_Source = self.Parent_Report
+            self.Dataset_Name = None
+            self.Current_year = int(str(self.Reporting_Period)[:4]) + 1 if str(self.Reporting_Period)[-2:] == '12' else int(str(self.Reporting_Period)[:4])
+            self.Previous_year = int(str(self.Reporting_Period)[:4]) if str(self.Reporting_Period)[-2:] == '12' else int(str(self.Reporting_Period)[:4]) - 1
+            
+            self.AllWatcherLog = pd.read_sql('select * from [DSKH_ARGUS_TOOLKIT]..[TBL_Watcher_All_Config] ',self.connectionSqlServer)
+             
+            self.Filename = f'Consolidated_{self.Data_Process}_{self.Reporting_Period}_{self.RUN_ID}.xlsm'
+            
+            # Check if Filename is empty
+            if not self.Filename:
+                raise Exception('Filename is empty')
+
+        except FileNotFoundError as fe:
+            raise Exception(f"__init__: {str(fe)}") 
+
+        except ValueError as ve:
+            raise Exception(f"__init__: {str(ve)}") 
+
+        except Exception as e:
+            raise Exception(f"__init__: {str(e)}") 
+
+
+def main(startTime):
+    try:
+        #global self.err
+        # Create object & initialize the attributes
+        start_Time=datetime.now()
+        print(f'{strftime("%m/%d/%Y %I:%M:%S %p")} - Consolidated Report Started \n')
+        obj = ConsolidatedReport(startTime)
+        P_ID =SP_SA_Process_Log(obj, None, 'Consolidated Report Started')
+        SP_SA_Audit_Log(obj,'Consolidated Report Process Started')               
+        output_File_path_1= get_output_file_path(obj)
+        Consolidated_Report(obj, output_File_path_1)
+        SP_SA_Audit_Log(obj,'Consolidated Report Process Completed')        
+        SP_SA_Process_Log(obj, P_ID, 'Consolidated Report Process Completed')
+        endTime = datetime.now()
+        print(f'\n*******************************************************')
+        print(f'{strftime("%m/%d/%Y %I:%M:%S %p")} - Consolidated Report Completed \n')
+        print(f'*******************************************************')
+        print(f'Total Time to complete Consolidated Report = {endTime-start_Time}\n')
+
+
+    except Exception as e:
+        print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - [ **** Error !!!!] Error occurred in method \"main\"\nError message is => {e}')
+        SP_SA_Error_Log(obj, str(e))
+        SP_SA_Audit_Log(obj,'Consolidated Process Failed')
+        SP_SA_Process_Log(obj, P_ID, 'Consolidated Process Failed')
+
+
+
+if __name__ == '__main__':
+    try:
+        # main function
+        print(f'Consolidated Report File Logs')
+        print(f'\n*******************************************************')
+        
+        #to call the main Function
+        main(strftime('%Y-%m-%d %H_%M_%S'))
+
+    except Exception as e:
+        print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - [ **** Error !!!!] Error occurred in method \"__main__\"\nError message is => {e}')

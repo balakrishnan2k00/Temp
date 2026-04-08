@@ -1,0 +1,793 @@
+"""
+
+This module generates Capital Ratio, Consolidated, Trend Analysis and Capital impact chart report. 
+All details in a single output File.
+
+"""
+import os
+import sys
+import warnings
+import configparser
+import pandas as pd
+import re
+import numpy as np  
+import win32com.client
+import matplotlib.pyplot as plt
+from openpyxl.worksheet.datavalidation import DataValidation
+from Consolidated_Process_Main import *
+from time import strftime
+from datetime import datetime
+from openpyxl import Workbook
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill,Font,Border, Side, Color, PatternFill, Alignment
+from pandas.errors import PerformanceWarning
+from SQL_Config_v2 import connectionToSQLServer,get_app_value,SP_SA_Process_Log,SP_SA_Audit_Log,SP_SA_Error_Log,db_TBL_Output_Report
+warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.simplefilter(action='ignore', category=PerformanceWarning)
+warnings.simplefilter(action="ignore", category=UserWarning)
+
+def update_cover_page(self,excel_file):
+    
+    try:
+        wb = load_workbook(excel_file, keep_vba=True)
+        # Check if 'Cover Page' exists in the workbook
+        if 'Cover Page' not in wb.sheetnames:
+            raise Exception("The worksheet 'Cover Page' does not exist in the workbook.")
+        
+        cover_sheet = wb['Cover Page']
+        
+        cover_sheet['E5'].value =  self.Report_Name
+        cover_sheet['E7'].value = self.Reporting_Period
+        cover_sheet['E9'].value = self.Data_Process
+        cover_sheet['E11'].value = self.Data_File_Name
+        cover_sheet['E13'].value = self.Mapping_File_Name
+        cover_sheet['E15'].value = self.Report_Creation_Time
+       
+        data_list = self.Source_Filename
+        # Start writing from cell E11
+        start_row = 17
+        column = 'E'
+
+        # Maximum cells to fill
+        max_cells = 10
+        if data_list:
+            # Calculate the number of values per cell
+            total_values = len(data_list)
+            values_per_cell = total_values // max_cells
+            extra_values = total_values % max_cells
+
+            # Distribute values into cells
+            index = 0
+            for i in range(max_cells):
+                num_values = values_per_cell + (1 if i < extra_values else 0)
+                # Convert None to an empty string
+                cell_values = ', '.join(str(value) if value is not None else '' for value in data_list[index:index + num_values])
+                cell = f"{column}{start_row + i}"
+                cover_sheet[cell].value = cell_values
+                index += num_values
+        else:
+            # If the list is empty, do nothing or clear the cells if needed
+            for i in range(max_cells):
+                cell = f"{column}{start_row + i}"
+                cover_sheet[cell].value = ''
+            
+        wb.save(excel_file)
+        
+        print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Cover page updated \n')
+        SP_SA_Audit_Log(self,f'Cover page updated ')
+    
+    except Exception as e:
+        raise Exception(f"update_cover_page: {str(e)}")
+
+def update_Capital_Ratio_data(self,excel_file, period_quarter, df_list):
+    try:
+        wb = load_workbook(excel_file, keep_vba=True)
+        # Check if 'Capital_Ratio' exists in the workbook
+        if 'Capital_Ratio' not in wb.sheetnames:
+            raise Exception("The worksheet 'Cover Page' does not exist in the workbook.")
+        
+        sheet = wb['Capital_Ratio']
+
+        # Write period_quarter values starting from the fourth row, second column
+        for idx, value in enumerate(period_quarter['Period_Quarter'], start=2):
+            sheet.cell(row=4, column=idx, value=value)
+
+        SP_SA_Audit_Log(self,'Period_Quarter is placed')
+
+        for data_df in df_list:
+		# Iterate over each row in the data_df DataFrame
+            for index, row in data_df.iterrows():
+                forecast_horizon_col = 'Forecast Horizon' if 'Forecast Horizon' in data_df.columns else 'C_Forecast_Horizon'
+                forecast_horizon = row[forecast_horizon_col]
+                # Find the row in the Excel sheet that matches the Forecast Horizon
+                for excel_row in range(6, sheet.max_row + 1):  # Assuming headers are in the third row
+                    excel_forecast_horizon = sheet.cell(row=excel_row, column=1).value
+                    if excel_forecast_horizon == forecast_horizon:
+                        for col_index, col_name in enumerate(['PQ0', 'PQ1', 'PQ2', 'PQ3', 'PQ4', 'PQ5', 'PQ6', 'PQ7', 'PQ8', 'PQ9'], start=2):
+                            sheet.cell(row=excel_row, column=col_index).value = row[col_name]
+                        break
+        SP_SA_Audit_Log(self,'Output report is updated with two data frames')
+        # Save the updated Excel file
+        wb.save(excel_file)
+        
+        print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Capital_Ratio updated \n')
+        SP_SA_Audit_Log(self,f'Capital_Ratio updated ')
+    
+    except Exception as e:
+        raise Exception(f"update_Capital_Ratio_data: {str(e)}")
+    
+def update_Consolidated_Report(self, excel_file, df, report_type, skip_rows=2):
+    try:
+        start_Time = datetime.now()
+
+        # Load the Excel file
+        wb = load_workbook(excel_file, keep_vba=True)
+
+        # Select the active sheet (assuming it's the first sheet)
+        sheet = wb['Consolidated']
+
+        # Extract existing headers from the sheet after skipping specified rows
+        headers = []
+        for col in range(1, sheet.max_column + 1):
+            header_cell = sheet.cell(row=skip_rows + 1, column=col)
+            header_value = header_cell.value
+
+            # Check if the cell above the header is part of a merged cell
+            merged_value = None
+            for merged_cell in sheet.merged_cells.ranges:
+                # Debug: Print merged cell range
+
+                if merged_cell.min_row == skip_rows and merged_cell.max_row == skip_rows:
+                    if merged_cell.min_col <= col <= merged_cell.max_col:
+                        merged_value = sheet.cell(row=skip_rows, column=merged_cell.min_col).value
+                        # Debug: Print merged value
+                        break
+
+            # Prefix header with merged cell value if applicable
+            if merged_value:
+                #merged_value = re.sub(r'[ .()\-\s]', '_', merged_value)
+                merged_value = re.sub(r'[ .()\-$+]', '_', merged_value)
+                #merged_value = re.sub(r'/', '', merged_value)
+
+                # Replace multiple underscores with a single underscore
+                
+                header_value = f"{merged_value}_{header_value}"
+                header_value = re.sub(r'_+', '_', header_value)
+
+            headers.append(header_value)
+
+        # Debug: Print final headers
+        # Match DataFrame columns to Excel columns
+        common_columns = [col for col in headers if col in df.columns]
+        # Get column indices in Excel file for matching columns
+        col_indices = [headers.index(col) + 1 for col in common_columns]
+        
+        # Write data from DataFrame to Excel file
+        for col_name, col_idx in zip(common_columns, col_indices):
+            for row_idx, value in enumerate(df[col_name], start=skip_rows + 2):  # Start from skip_rows + 1 (headers row)
+                #sheet.cell(row=row_idx, column=col_idx).value = value
+                sheet.cell(row=row_idx, column=col_idx).value = value
+        
+        # Save the modified Excel file
+        wb.save(excel_file)
+       
+        #db_TBL_Output_Report(self, report_type, os.path.basename(excel_file), 'S')
+        SP_SA_Audit_Log(self, f'{report_type} Report updated')
+
+        print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Data is updated in the {report_type} Report\n')
+        endTime = datetime.now()
+        print(f'Time to complete update_Consolidated_Report for {report_type} = {endTime-start_Time}\n')
+
+    except Exception as e:
+        raise Exception(f"update_Consolidated_Report: {str(e)}")
+
+def update_merged_cells(self,excel_file,sheet_name): 
+
+        SP_SA_Audit_Log(self,f'Updating the merged cell values in {sheet_name}')
+        print(f"\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Updating the merged cell values in '{sheet_name}'\n")  
+        
+        # Load the workbook  
+        workbook = load_workbook(excel_file, keep_vba=True)
+        sheet = workbook[sheet_name]  # Ensure 'MEV' sheet exists  
+
+        # List to hold the merged cell ranges in order  
+        merged_ranges = list(sheet.merged_cells.ranges)  
+
+        # Sort the merged ranges by the start row and then start column  
+        merged_ranges.sort(key=lambda r: (r.bounds[1], r.bounds[0]))  # bounds gives min_row, min_col, max_row, max_col  
+
+        occurrence = 1  # Initialize occurrence counter  
+
+        # Update merged cells according to your specification  
+        for merged_range in merged_ranges:  
+            # Get the first cell in the merged range  
+            first_cell = str(merged_range).split(':')[0]  
+            original_value = sheet[first_cell].value  
+            
+            # Ensure original_value is not None before processing  
+            if original_value is not None:  
+                #print(f"Processing Merged Range: {merged_range}, First Cell: {first_cell}, Original Value: {original_value}")  
+
+                # Check the conditions and replace values accordingly  
+                if "YYYY" in original_value and "RIHC\\CNB" in original_value and occurrence == 1:  
+                    if str(self.Reporting_Period)[-2:] == '12':
+                        year = int(str(self.Reporting_Period)[:4]) + 1
+                    else:
+                        year = int(str(self.Reporting_Period)[:4])
+                    # Replace for the first merged cell  
+                    new_value = original_value.replace("YYYY", str(year)).replace("RIHC\\CNB", self.Data_Process)  
+                    #print(f"Updating Merged Cell {occurrence}: New Value: {new_value}")  
+                    sheet[first_cell].value = new_value  
+                    occurrence += 1  # Increment occurrence for the next check  
+
+                elif "YYYY" in original_value and "RIHC\\CNB" in original_value and occurrence == 2:  
+                    if str(self.Reporting_Period)[-2:] == '12':
+                        year = int(str(self.Reporting_Period)[:4])
+                    else:
+                        year = int(str(self.Reporting_Period)[:4]) - 1
+                    # Replace for the second merged cell
+                    new_value = original_value.replace("YYYY", str(year)).replace("RIHC\\CNB", self.Data_Process)
+                    #print(f"Updating Merged Cell {occurrence}: New Value: {new_value}")
+                    sheet[first_cell].value = new_value
+                    occurrence += 1  # Increment occurrence for the next check
+
+        # Save the workbook with the updated values  
+        workbook.save(excel_file)  
+        SP_SA_Audit_Log(self,f'Updated merged cell values in {sheet_name}')
+        print(f"\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Updated merged cell values in '{sheet_name}'\n")  
+
+def update_Trend_Analysis(self, excel_file, df, report_type, sheet_name, skip_rows=3):
+    try:
+        start_Time = datetime.now()
+
+        # Load the Excel file
+        wb = load_workbook(excel_file, keep_vba=True)
+
+        # Select the active sheet (assuming it's the first sheet)
+        sheet = wb[sheet_name]
+
+        # Extract existing headers from the sheet after skipping specified rows
+        headers = []
+        for col in range(1, sheet.max_column + 1):
+            header_cell = sheet.cell(row=skip_rows + 1, column=col)
+            header_value = header_cell.value
+
+            # Check if the cell above the header is part of a merged cell
+            merged_value = None
+            for merged_cell in sheet.merged_cells.ranges:
+                # Debug: Print merged cell range
+
+                if merged_cell.min_row == skip_rows and merged_cell.max_row == skip_rows:
+                    if merged_cell.min_col <= col <= merged_cell.max_col:
+                        merged_value = sheet.cell(row=skip_rows, column=merged_cell.min_col).value
+                        # Debug: Print merged value
+                        break
+
+            # Prefix header with merged cell value if applicable
+            if merged_value:
+                #merged_value = re.sub(r'[ .()\-\s]', '_', merged_value)
+                merged_value = re.sub(r'[ .()\-$+]', '_', merged_value)
+                header_value = re.sub(r'[ .()\-$+]', '_', header_value)
+                #merged_value = re.sub(r'/', '', merged_value)
+
+                # Check the year in merged_value  
+                if str(self.Current_year) in merged_value:  
+                    merged_value = 'Current'  
+                elif str(self.Previous_year) in merged_value:  
+                    merged_value = 'Previous'  
+                else:  
+                    merged_value = 'Difference' 
+
+                # Replace multiple underscores with a single underscore
+                header_value = f"{header_value}_{merged_value}"
+                header_value = re.sub(r'_+', '_', header_value)
+
+            headers.append(header_value)
+                
+        # Match DataFrame columns to Excel columns
+        common_columns = [col for col in headers if col in df.columns]
+        # Get uncommon columns  
+        uncommon_columns = list(set(headers) - set(common_columns)) + list(set(df.columns) - set(common_columns))  
+
+        print('uncommon_columns: ',uncommon_columns)
+        # Get column indices in Excel file for matching columns
+        col_indices = [headers.index(col) + 1 for col in common_columns]
+            
+        # Define the fill patterns for yellow and orange  
+        light_grey_fill = PatternFill(start_color='D3D3D3', end_color='D3D3D3', fill_type='solid')  # Light Grey  
+        dark_grey_fill = PatternFill(start_color='A9A9A9', end_color='A9A9A9', fill_type='solid')  # Dark Grey
+        light_blue_fill = PatternFill(start_color="B3E0F2", end_color="B3E0F2", fill_type="solid")            
+        null_columns = ['Scenario', 'Function', 'Impact'] 
+        # Define the font  
+        calibri_font = Font(name='Calibri', size=10)
+        # Assuming you have already defined common_columns, col_indices and df elsewhere  
+        previous_was_total = False  # Track if the last row was a "Total"  
+
+        for col_name, col_idx in zip(common_columns, col_indices):  
+            for row_idx, value in enumerate(df[col_name], start=skip_rows + 2):  # Start from skip_rows + 2 (headers row)  
+                cell = sheet.cell(row=row_idx, column=col_idx)
+                cell.value = value 
+                cell.font = calibri_font
+                if col_name == "Scenario": 
+                    # Check if the value contains the string "Total"  
+                    if isinstance(value, str) and "Total" in value and value.endswith("Total"):  
+                        if not previous_was_total:  
+                            # Highlight the first "Total" row in yellow  
+                            for col in range(1, sheet.max_column + 1):  # Highlighting all columns up to max column 
+                                sheet.cell(row=row_idx, column=col).fill = light_grey_fill  
+                            previous_was_total = True  # Mark the current as the first "Total"  
+                        else:  
+                            # Highlight the second consecutive "Total" row in orange  
+                            for col in range(1, sheet.max_column + 1):  # Highlighting all columns up to max column  
+                                sheet.cell(row=row_idx, column=col).fill = light_blue_fill  
+                            previous_was_total = False  # Reset for the next sequence  
+                    else:  
+                        previous_was_total = False  # Reset if current value is not "Total"    
+                        
+                if 'Assumption_grouping' in df.columns:        
+                    if all(pd.isna(df.loc[row_idx - (skip_rows + 2), col]) for col in null_columns):
+                        # Highlight the entire row in grey if all specified columns are NULL  
+                        for col in range(1, sheet.max_column + 1):  # Highlighting all columns up to max column  
+                            sheet.cell(row=row_idx, column=col).fill = light_blue_fill  
+
+        # Save the modified Excel file
+        wb.save(excel_file)
+        #db_TBL_Output_Report(self, report_type, os.path.basename(excel_file), 'S')
+        SP_SA_Audit_Log(self, f'{report_type} Report updated')
+
+        print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Data is updated in the {report_type} Report\n')
+        endTime = datetime.now()
+        print(f'Time to complete update_Trend_Analysis for {report_type} = {endTime-start_Time}\n')
+
+    except Exception as e:
+        raise Exception(f"update_Trend_Analysis: {str(e)}")
+
+def update_excel_with_df_data(self, excel_path, df_list,skip_rows=2):
+        # Load your Excel file
+        workbook = load_workbook(excel_path, keep_vba=True)
+        Sensitivity_sheet = workbook['Sensitivity']
+        agglist_df = pd.read_sql(f"""SELECT Aggregation_Group FROM DSKH_ARGUS_ETL_PROCESS_SA..VW_SA_{self.Data_Process}_Capital_Impact_aggregation GROUP BY Aggregation_Group ORDER BY REPLACE(Aggregation_Group,'Agg','')""",self.connectionSqlServer)
+        printedrows = 0
+        
+        for idx, row in agglist_df.iterrows():
+            agg_group = row['Aggregation_Group']
+            df_filtr = df_list[df_list['Aggregation_Group'] == agg_group]
+            if printedrows == 0:
+                printrow = skip_rows + 2
+            elif (printedrows != 0):
+                printrow = printedrows
+                
+            if agg_group in ('Agg2.1', 'Agg3.1'):
+                columns_to_replace = ['Sum.4', 'Sum.5', 'Sum.6', 'Sum.7']
+                for col in columns_to_replace:
+                    df_filtr.iloc[:, df_filtr.columns.get_loc(col)] = df_filtr.iloc[:, df_filtr.columns.get_loc(col)].replace(0, "")
+            
+            # Extract existing headers from the sheet after skipping specified rows
+            headers = []
+            for col in range(1, Sensitivity_sheet.max_column + 1):
+                headers.append(Sensitivity_sheet.cell(row= skip_rows + 1, column=col).value)
+
+            #print(headers)
+            # Match DataFrame columns to Excel columns
+            common_columns = [col for col in headers if col in df_filtr.columns]
+
+            # Get column indices in Excel file for matching columns
+            col_indices = [headers.index(col) + 1 for col in common_columns]
+            
+            # Define border styles
+            thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+
+            # Write data from DataFrame to Excel file
+            for col_name, col_idx in zip(common_columns, col_indices):
+                for row_idx, value in enumerate(df_filtr[col_name], start = printrow):  # Start from skip_rows + 1 (headers row)
+                    cell = Sensitivity_sheet.cell(row=row_idx, column=col_idx)
+                    skp = 4
+                    if agg_group == 'Agg3.1' and col_idx > skp and col_idx not in (14,25,36,47) :
+                        if isinstance(value, (int, float)):
+                            cell.value = f"{(value):.2f}%"
+                        else:
+                            cell.value = value
+                    else:
+                        cell.value = value
+                    cell.border = thin_border
+                    cell.fill = PatternFill(start_color='F2F2F2', end_color='F2F2F2', fill_type='solid')
+                    cell.alignment = Alignment(wrap_text=True, horizontal='left', vertical='bottom')
+            
+            printedrows = printrow + df_filtr.shape[0] + 1
+
+            if agg_group in ('Agg1.3', 'Agg2.1'):
+                    # Merge the row from column A to AR and print the hardcoded value
+                    Sensitivity_sheet.merge_cells(start_row=printedrows, start_column=1, end_row=printedrows, end_column=44)
+                    cell = Sensitivity_sheet.cell(row=printedrows, column=1)
+                    if agg_group == 'Agg1.3':
+                        cell.value = "Cumul. bps Impact"
+                    elif agg_group == 'Agg2.1':
+                        cell.value = "Revised Capital Ratios"
+                    cell.border = thin_border
+                    cell.fill = PatternFill(start_color='99CCFF', end_color='99CCFF', fill_type='solid')
+                    cell.alignment = Alignment(wrap_text=True, horizontal='left', vertical='center')
+                    printedrows = printedrows + 1
+    
+        SP_SA_Audit_Log(self,'Output report is updated with two data frames')
+        # Save the updated Excel file
+        workbook.save(excel_path)
+
+def update_Reference(self, excel_file):
+        try:
+            print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Updating Reference \n')
+            SP_SA_Audit_Log(self,f'Updating Reference ')
+            
+            wb = load_workbook(excel_file, keep_vba=True)
+            # Check if 'Reference' exists in the workbook
+            if 'Reference' not in wb.sheetnames:
+                raise Exception("The worksheet 'Reference' does not exist in the workbook.")
+            
+            # Check if 'Reference' exists in the workbook
+            if 'Pivot Chart' not in wb.sheetnames:
+                raise Exception("The worksheet 'Pivot Chart' does not exist in the workbook.")
+            
+            Reference_sheet = wb['Reference']
+            PivotChart_sheet = wb['Pivot Chart']
+            #period_id = self.Reporting_Period
+            
+            Reference_value = pd.read_sql(f"""SELECT DISTINCT Aggregation_Scenario FROM DSKH_ARGUS_ETL_PROCESS_SA..VW_SA_{self.Data_Process}_Capital_Impact_Chart""",self.connectionSqlServer)
+            
+            Reference_value_list = Reference_value['Aggregation_Scenario'].tolist()
+        
+            # Write dropdown options to a hidden column in the Reference sheet
+            for idx, value in Reference_value.iterrows():
+                Reference_sheet.cell(row=2+idx, column=1, value=value['Aggregation_Scenario'])  # Column 1 (A) is used for dropdown options
+            
+            # Define the range of dropdown options in the Reference sheet
+            dropdown_range = f"Reference!$A$2:$A${len(Reference_value) + 1}"
+            
+            # Create a data validation object
+            data_validation = DataValidation(type="list", formula1=f"={dropdown_range}", allow_blank=True)
+
+            # Add the data validation to a specific cell in the Pivot Chart sheet
+            PivotChart_sheet.add_data_validation(data_validation)
+
+            # Set the default value in the dropdown as the first value in the list
+            if not Reference_value.empty:
+                PivotChart_sheet["A2"].value = Reference_value.iloc[0]['Aggregation_Scenario']
+            data_validation.add(PivotChart_sheet["A2"])
+            
+            wb.save(excel_file)
+            
+            print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Cover page updated \n')
+            SP_SA_Audit_Log(self,f'Reference updated')
+
+            return Reference_value_list
+        
+        except Exception as e:
+            raise Exception(f"update_Reference: {str(e)}")
+    
+def datasheet_create(self, excel_file, Sheet):           
+        try:
+        # Load the workbook and the first sheet
+            wb = load_workbook(excel_file, keep_vba=True)
+        
+        # Check if 'Data_sheet' exists in the workbook
+            if 'Data_sheet' not in wb.sheetnames:
+                raise Exception("The worksheet 'Data_sheet' does not exist in the workbook.")
+            
+            Reference_sheet = wb['Data_sheet']
+            
+        # Duplicate the sheet 4 times with new names
+            for sheet_create in Sheet:
+                new_sheet = wb.create_sheet(title=sheet_create)
+                for row in Reference_sheet.iter_rows(values_only=True):
+                    new_sheet.append(row)
+
+        #Remove the 'Data_sheet' exists in the workbook
+            wb.remove(Reference_sheet)
+        
+        # Save the new Excel file in the specified location
+            wb.save(excel_file)
+            
+            print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - datasheet createD \n')
+            SP_SA_Audit_Log(self,f'datasheet created')
+        except Exception as e:
+            print(f"Error: {e}")
+    
+def Hide_Sheets(self, excel_file,sheet):
+        try:
+            # Load the workbook and the first sheet
+            wb = load_workbook(excel_file, keep_vba=True)
+
+            Reference_sheet = wb['Reference']
+            
+            # Hide the Reference sheet
+            Reference_sheet.sheet_state = 'hidden'
+            
+            for sheet_name in sheet:
+               if sheet_name in wb.sheetnames:
+                     hide_sheet = wb[sheet_name]
+                     hide_sheet.sheet_state = 'hidden'
+               else:
+                     print(f"Warning: Sheet '{sheet_name}' does not exist in the workbook and cannot be hidden.")
+
+            # Save the new Excel file in the specified location
+            wb.save(excel_file)
+            
+            print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Hide Sheets completed \n')
+            SP_SA_Audit_Log(self,f'Hide Sheets completed')
+            
+        except Exception as e:
+            print(f"Error: {e}")
+            
+def datasheet_fill(self, excel_file, Sheet):     
+        try:
+            # Load the workbook and the first sheet
+            wb = load_workbook(excel_file, keep_vba=True)
+        
+            # Duplicate the sheet 4 times with new names
+            Sheet_names = Sheet 
+        
+            for names in Sheet_names:
+                df1 = pd.read_sql(f"""select * from DSKH_ARGUS_ETL_PROCESS_SA..VW_SA_{self.Data_Process}_Capital_Impact_Chart where Aggregation_Scenario='{names}' and Aggregation_Group='Agg4.1'""",self.connectionSqlServer)
+                df2 = pd.read_sql(f"""select * from DSKH_ARGUS_ETL_PROCESS_SA..VW_SA_{self.Data_Process}_Capital_Impact_Chart where Aggregation_Scenario='{names}' and Aggregation_Group='Agg4.2' ORDER BY Input_Type DESC""",self.connectionSqlServer)
+                # Merge the two DataFrames
+                merged_df = pd.concat([df1, df2], ignore_index=True)
+
+                # Write only the matched columns to the corresponding sheet
+                sheet = wb[names]
+                headers = [cell.value for cell in sheet[1]]  # Assuming the first row contains headers
+                matched_columns = [col for col in merged_df.columns if col in headers]
+
+                # Get column indices in Excel file for matching columns
+                col_indices = [headers.index(col) + 1 for col in matched_columns]
+
+                for col_name, col_idx in zip(matched_columns, col_indices):
+                    for row_idx, value in enumerate(merged_df[col_name], start=2):  # Start from row 2 to skip headers
+                        sheet.cell(row=row_idx, column=col_idx, value=value)
+                 
+            # Save the new Excel file in the specified location
+            wb.save(excel_file)
+            
+            print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - datasheet Filled \n')
+            SP_SA_Audit_Log(self,f'datasheet Filled')
+        
+        except Exception as e:
+            print(f"Error: {e}")
+    
+def printing_Formula(self, excel_file):
+        try:
+            # Load the workbook and the first sheet
+            wb = load_workbook(excel_file, keep_vba=True)
+            
+            # Check if 'Pivot Chart' exists in the workbook
+            if 'Pivot Chart' not in wb.sheetnames:
+                raise Exception("The worksheet 'Pivot Chart' does not exist in the workbook.")
+            
+            Pivotchart_sheet = wb['Pivot Chart']
+            
+            # Define border styles
+            thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+
+            # Loop through columns A to O and rows 4 to 100
+            for col in range(1, 16):  # Columns A to O (1 to 15 in 1-based index)
+                for row in range(4, 104):  # Rows 4 to 100
+                    # Get the column letter
+                    col_letter = chr(64 + col)  # Convert column number to letter (A=1, B=2, ...)
+                    a = row - 2
+                    # Write the formula into the cell
+                    formula = f'=IFERROR(IF(INDIRECT("\'" & $A$2 & "\'!{col_letter}" & ROW({col_letter}{a})) = "", "", INDIRECT("\'" & $A$2 & "\'!{col_letter}" & ROW({col_letter}{a}))),"")'
+                    Pivotchart_sheet[f'{col_letter}{row}'].value = formula
+                    
+                    # Ensure the formula is written correctly without '@'
+                    Pivotchart_sheet[f'{col_letter}{row}'].value = Pivotchart_sheet[f'{col_letter}{row}'].value.replace('@', '')
+
+                    # Apply border only if the cell contains data
+                    if Pivotchart_sheet[f'{col_letter}{row}'].value not in (None, ""):
+                        Pivotchart_sheet[f'{col_letter}{row}'].border = thin_border
+
+                    # Apply custom format 0.00\% for columns E to N
+                    if 'E' <= col_letter <= 'N':
+                        Pivotchart_sheet[f'{col_letter}{row}'].number_format = '0.00\\%'
+
+            #Hide O column in the sheet
+            Pivotchart_sheet.column_dimensions['O'].hidden = True
+
+            # Save the new Excel file in the specified location
+            wb.save(excel_file)
+            
+            print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Formula printed \n')
+            SP_SA_Audit_Log(self,f'Formula printed')
+
+        except Exception as e:
+            raise Exception(f"Capital_Ratio_Report: {str(e)}")
+    
+def Create_chart(self, excel_file):
+    try:
+        # Execute the VB function in the .xlsm file
+        try:
+            excel = win32com.client.Dispatch("Excel.Application")
+            excel.Visible = False  # Set to True if you want to see the Excel window
+        except Exception as e:
+            raise Exception(f"Failed to initialize Excel application. Ensure Excel is installed and accessible. Error: {str(e)}")
+
+        # Open the workbook
+        workbook = excel.Workbooks.Open(excel_file)
+
+        # Call the VB function (replace 'YourMacroName' with the actual macro name)
+        excel.Application.Run("Sheet3.CreateLineChartMEV")
+        excel.Application.Run("Sheet3.CreateLineChartAssumption")
+
+        # Save and close the workbook
+        workbook.Close(SaveChanges=True)
+        excel.Quit()
+                
+        print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - VB function executed successfully \n')
+        SP_SA_Audit_Log(self, f'VB function executed successfully')
+                
+    except Exception as e:
+        raise Exception(f"Capital_Ratio_Report: {str(e)}") 
+      
+def get_output_file_path(self):
+    try:
+        # Log the start of the template location fetching process
+        print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Fetching Template Location! \n')
+        
+        # Retrieve the template path from the application configuration
+        template_path = get_app_value(self.AllWatcherLog, self.Report_Name, str(self.Report_Name) + '_Template_Location', 'Y')[0]
+        print (template_path)
+        # Check if the template file exists at the specified path and Raise an exception if the template file is not found
+        if not (os.path.exists(template_path)):
+            raise Exception('Template not found, Please check the Template path')
+            
+        SP_SA_Audit_Log(self,'Templates path Fetched')
+            
+        File_Location = get_app_value(self.AllWatcherLog,'SAOutputReport','SA_Output_Location','Y')[0]
+            
+        output_File_name = self.Filename
+            
+        output_File_path = os.path.join(File_Location,self.Parent_Report,self.Report_Name,self.Data_Process,str(self.Reporting_Period))
+        
+        try:
+            if os.path.exists(output_File_path):
+                print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Directory exists: {output_File_path}\n')
+                SP_SA_Audit_Log(self,f'Directory exists {output_File_path}')
+            else:
+                os.makedirs(output_File_path)
+                print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Directory {output_File_path} created\n')
+                SP_SA_Audit_Log(self,f'Directory created {output_File_path}')
+        except Exception as e:
+            raise Exception(f"get_output_file_path: {str(e)}")
+            
+        output_File_path = os.path.join(output_File_path,output_File_name)
+
+        with open(template_path, 'rb') as src, open(output_File_path, 'wb') as dest:
+            dest.write(src.read())
+            print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Template copied successfully! \n')
+        SP_SA_Audit_Log(self,f'Template copied successfully')
+            
+        return output_File_path
+
+    except Exception as e:
+        raise Exception(f"get_output_file_path: {str(e)}")
+
+def Consolidated_Report(self,output_File_name_1):
+    try:
+        start_Time=datetime.now()
+        #------------------------------Capital Ratio Code------------------------------------#
+        print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Getting data from TBL_SA_Period_Lookup \n')
+          
+        if str(self.Reporting_Period)[-2:] == '12':
+            period_quarters = pd.read_sql(f"""select top 10 Period_Quarter from DSKH_ARGUS_ETL_PROCESS_SA..TBL_SA_Period_Lookup where Date_EOM>=(select max(date_eom) from DSKH_ARGUS_ETL_PROCESS_SA..TBL_SA_Period_Lookup where Year = left({self.Reporting_Period},4)) order by Period_Quarter""", self.connectionSqlServer)
+        else:
+            year = int(str(self.Reporting_Period)[:4]) - 1
+            period_quarters = pd.read_sql(f"""select top 10 Period_Quarter from DSKH_ARGUS_ETL_PROCESS_SA..TBL_SA_Period_Lookup where Date_EOM>=(select max(date_eom) from DSKH_ARGUS_ETL_PROCESS_SA..TBL_SA_Period_Lookup where Year={year}) order by Period_Quarter""", self.connectionSqlServer)
+        
+        SP_SA_Audit_Log(self,f'Period Quarters fetched from TBL_SA_Period_Lookup')
+            
+        print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Getting data from View VW_SA_{self.Data_Process}_Capital_Ratio \n')
+        df_1 = pd.read_sql(f"""select * from VW_SA_{self.Data_Process}_Capital_Ratio""", self.connectionSqlServer)
+        SP_SA_Audit_Log(self,f'Created Dataframe for VW_SA_{self.Data_Process}_Capital_Ratio')
+
+        print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Getting data from View VW_SA_{self.Data_Process}_Forecast_Horizon \n')
+        df_3 = pd.read_sql(f"""select * from VW_SA_{self.Data_Process}_Forecast_Horizon""", self.connectionSqlServer)
+        SP_SA_Audit_Log(self,f'Created Dataframe for VW_SA_{self.Data_Process}_Forecast_Horizon')
+            
+        df_list = [df_1,df_3]
+        update_cover_page(self, output_File_name_1)                                  #To fill Cover page
+        update_Capital_Ratio_data(self, output_File_name_1, period_quarters,df_list) #To fill captial Ratio sheet
+        
+        #------------------------------Consolidated Report Code------------------------------------#
+        print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Getting data from View vw_SA_{self.Data_Process}_Consolidated_Input \n')
+            
+        #Read Data from vw_SA_{self.Data_Process}_Consolidated_Input
+        Consolidated_Input_df = pd.read_sql(f"""select * from DSKH_ARGUS_ETL_PROCESS_SA..vw_SA_{self.Data_Process}_Consolidated_Input""", self.connectionSqlServer)
+        
+        if Consolidated_Input_df.empty:
+            raise Exception(f'No data in View vw_SA_{self.Data_Process}_Consolidated_Input')
+        SP_SA_Audit_Log(self,f'Created Dataframe for vw_SA_{self.Data_Process}_Consolidated_Input')
+        
+        update_Consolidated_Report(self, output_File_name_1,Consolidated_Input_df,self.Report_Name)
+        
+        #------------------------------Trend Analysis Report Code------------------------------------#
+        #Read Data from vw_SA_{self.Data_Process}_Consolidated_Input
+        MEV_df = pd.read_sql(f"""SELECT * FROM DSKH_ARGUS_ETL_PROCESS_SA..VW_SA_{self.Data_Process}_Trend_Analysis_MEV ORDER BY Scenario, ISNULL([Function],'ZZZZZZZZZZZZZ')""", self.connectionSqlServer)
+        # Move value to scenario if 'Total' is in Function and then set Function to NaN  
+        
+        # Create a mask to identify consecutive duplicates based on Scenario and Function  
+        if MEV_df.empty:
+            raise Exception(f'No data in View VW_SA_{self.Data_Process}_Trend_Analysis_MEV')
+        mask = (MEV_df['Scenario'] == MEV_df['Scenario'].shift()) & (MEV_df['Function'] == MEV_df['Function'].shift())  
+
+        # Replace duplicates with None, retaining the first occurrence  
+        MEV_df.loc[mask, ['Scenario', 'Function']] = None  
+
+        # If 'Function' contains 'Total', move that value to Scenario and set Function to None  
+        MEV_df['Scenario'] = MEV_df.apply(lambda x: x['Function'] if 'Total' in str(x['Function']) else x['Scenario'], axis=1)  
+        MEV_df['Function'] = MEV_df.apply(lambda x: None if 'Total' in str(x['Function']) else x['Function'], axis=1)  
+        print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Data fetched from View vw_SA_{self.Data_Process}_Trend_Analysis_MEV and Re-structured \n')
+        SP_SA_Audit_Log(self,f'Data fetched from View vw_SA_{self.Data_Process}_Trend_Analysis_MEV and Re-structured')
+        print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Getting data from View vw_SA_{self.Data_Process}_Trend_Analysis_assumption \n')    
+        SP_SA_Audit_Log(self,f'Getting data from View vw_SA_{self.Data_Process}_Trend_Analysis_assumption')
+        Assumption_df = pd.read_sql(f"""select * from DSKH_ARGUS_ETL_PROCESS_SA..VW_SA_{self.Data_Process}_Trend_Analysis_assumption ORDER BY ISNULL(Assumption_grouping,'Blank'),[FUNCTION] desc, Scenario asc""", self.connectionSqlServer)
+        if Assumption_df.empty:
+            raise Exception(f'No data in View VW_SA_{self.Data_Process}_Trend_Analysis_assumption')
+        #Assumption_df.to_excel('Assumption_df.xlsx')
+        # Get the first row for comparison  
+        first_row = Assumption_df.iloc[0]  
+
+        # Use iterrows to iterate over the DataFrame starting from the second row  
+        for index, row in Assumption_df.iterrows():  
+            # Skip the first row  
+            if index == 0:  
+                continue  
+            if pd.isna(row['Scenario']):
+                Assumption_df.loc[index, ['Function'] ]= np.nan
+                # Check if 'Total' is in the Scenario column of the current row, only if Scenario is not NaN  
+            if pd.notnull(row['Scenario']) and 'Total' in row['Scenario']:  
+                # Replace Function and Assumption_grouping with NaN  
+                Assumption_df.loc[index, ['Function', 'Assumption_grouping']] = np.nan  
+            # Check if the "Impact" is not null  
+            if pd.notnull(row['Impact']):  
+                # Compare only the Scenario, Function, and Assumption_grouping columns  
+                if (row[['Scenario', 'Function', 'Assumption_grouping']] == first_row[['Scenario', 'Function', 'Assumption_grouping']]).all():  
+                    # If equal, replace only the specified columns with NaN  
+                    Assumption_df.loc[index, ['Scenario', 'Function', 'Assumption_grouping']] = np.nan  
+                else:  
+                    # Update first_row to the current row if values do not match  
+                    first_row = Assumption_df.loc[index]  
+            else:  
+                # If Impact is null, just continue without any changes  
+                continue  
+            
+            # Check if 'Total' is in the Scenario column of the current row, only if Scenario is not NaN  
+            if pd.notnull(row['Scenario']) and 'Total' in row['Scenario']:  
+                # Replace Function and Assumption_grouping with NaN  
+                Assumption_df.loc[index, ['Function', 'Assumption_grouping']] = np.nan  
+                
+        print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Data fetched from View vw_SA_{self.Data_Process}_Trend_Analysis_assumption and Re-structured \n')
+        SP_SA_Audit_Log(self,f'Created Dataframe for vw_SA_{self.Data_Process}_Trend_Analysis_assumption')
+        #self.update_cover_page(output_File_name_1)
+        update_merged_cells(self,output_File_name_1,'MEV')
+        update_merged_cells(self,output_File_name_1,'Assumption')
+        update_Trend_Analysis(self,output_File_name_1,MEV_df,self.Report_Name,'MEV')
+        update_Trend_Analysis(self,output_File_name_1,Assumption_df,self.Report_Name,'Assumption') 
+        #------------------------------Capital Impact Report Code------------------------------------#
+        print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - Getting data from View VW_SA_{self.Data_Process}_Capital_Impact_aggregation \n')
+        df_1 = pd.read_sql(f"""select * from DSKH_ARGUS_ETL_PROCESS_SA..VW_SA_{self.Data_Process}_Capital_Impact_aggregation""", self.connectionSqlServer)
+        SP_SA_Audit_Log(self,f'Created Dataframe for VW_SA_{self.Data_Process}_Capital_Impact_aggregation')
+
+        update_excel_with_df_data(self,output_File_name_1, df_1)
+        Sheetnames = update_Reference(self,output_File_name_1)
+        datasheet_create(self,output_File_name_1, Sheetnames)
+        datasheet_fill(self,output_File_name_1, Sheetnames)
+        Hide_Sheets(self,output_File_name_1, Sheetnames)
+        printing_Formula(self,output_File_name_1)
+        #Create_chart(self,output_File_name_1)
+            
+        print(f'\n{strftime("%m/%d/%Y %I:%M:%S %p")} - {self.Report_Name} Report updated\n')
+        SP_SA_Audit_Log(self,f'{self.Report_Name} Report updated')
+        db_TBL_Output_Report(self,self.Report_Name,os.path.basename(output_File_name_1),'S')
+            
+        endTime = datetime.now()
+        print(f'Total Time to complete SQ_Capital_Ratio_Report = {endTime-start_Time}\n')
+
+
+    except Exception as e:
+        raise Exception(f"Capital_Ratio_Report: {str(e)}")
